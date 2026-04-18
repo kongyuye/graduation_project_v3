@@ -1,0 +1,29 @@
+# 忽略 Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 忽略环境配置和IDE文件
+.venv/
+venv/
+ENV/
+env/
+.idea/
+.vscode/
+.DS_Store
+
+# 忽略大型数据文件和模型权重 (千万不要把这些传到GitHub，会超出体积限制)
+*.npy
+*.csv
+*.pth
+*.pkl
+*.h5
+*.pt
+
+# 忽略具体的数据目录
+processed_data/
+processed_train_data/
+processed_test_data/
+stgcn_dataset/
+stgcn_dataset_v2/
+PHM 2012/data/raw/
