@@ -1,5 +1,6 @@
 import os
 import glob
+import re
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
@@ -335,11 +336,11 @@ class HealthIndicatorConstructor:
 
 def process_dataset(raw_dir: str, output_dir: str, is_train: bool = True):
     """
-    数据处理流水线
+    数据处理流水线 (已修复版)
     """
     extractor = FeatureExtractor()
     
-    # 获取所有的轴承目录 (如 Bearing1_1)
+    # 获取所有的轴承目录
     bearing_dirs = sorted([d for d in os.listdir(raw_dir) if os.path.isdir(os.path.join(raw_dir, d))])
     
     for bearing_name in bearing_dirs:
@@ -347,45 +348,54 @@ def process_dataset(raw_dir: str, output_dir: str, is_train: bool = True):
         bearing_path = os.path.join(raw_dir, bearing_name)
         all_features = []
         
-        # 获取该轴承下的所有振动 csv 文件
-        csv_files = sorted(glob.glob(os.path.join(bearing_path, "acc_*.csv")))
+        # 修复 1：安全的时序排序逻辑，强制根据文件名中的数字索引进行排序
+        def extract_file_idx(filename):
+            match = re.search(r'acc_(\d+)\.csv', os.path.basename(filename))
+            return int(match.group(1)) if match else -1
+            
+        csv_files = glob.glob(os.path.join(bearing_path, "acc_*.csv"))
+        # 过滤掉无法匹配正则的异常文件并按真实数字时序排序
+        csv_files = sorted([f for f in csv_files if extract_file_idx(f) != -1], key=extract_file_idx)
+        
         temp_cache = {}
         
         for file_path in csv_files:
             try:
-                # PHM 2012 振动 CSV格式: 小时, 分钟, 秒, 微秒, 水平振动, 垂直振动
-                df = pd.read_csv(file_path, header=None)
+                # 工业数据常常因为末尾逗号导致列错位，使用 on_bad_lines='skip' 提升鲁棒性
+                df = pd.read_csv(file_path, header=None, on_bad_lines='skip')
                 
-                # 检查数据维度
                 if df.shape[1] < 6:
-                    print(f"Warning: Unexpected data shape in {file_path}")
+                    print(f"Warning: Unexpected data shape {df.shape} in {file_path}")
                     continue
 
-                # [:, 4]：行索引，列索引    
-                horiz_acc = df.iloc[:, 4].values
-                vert_acc = df.iloc[:, 5].values
+                # 修复 3：强制转换为数值类型，将无法解析的字符转为 NaN，避免后续 numpy 计算崩溃
+                horiz_acc = pd.to_numeric(df.iloc[:, 4], errors='coerce').values
+                vert_acc = pd.to_numeric(df.iloc[:, 5], errors='coerce').values
                 
                 # 提取特征
                 h_feat = extractor.extract_all(horiz_acc, prefix='h_')
                 v_feat = extractor.extract_all(vert_acc, prefix='v_')
                 
-                # 获取对应的温度数据 (每6个振动文件对应1个温度文件)
-                import re
+                # 温度对齐逻辑
                 acc_filename = os.path.basename(file_path)
-                match = re.search(r'acc_(\d+)\.csv', acc_filename)
-                temp_mean = 0.0
+                acc_idx = extract_file_idx(acc_filename)
                 
-                if match:
-                    acc_idx = int(match.group(1))
-                    temp_idx = (acc_idx - 1) // 6 + 1
-                    temp_file = os.path.join(bearing_path, f"temp_{temp_idx:05d}.csv")
-                    
-                    if temp_file in temp_cache:
-                        temp_mean = temp_cache[temp_file]
-                    elif os.path.exists(temp_file):
-                        df_temp = pd.read_csv(temp_file, header=None)
-                        if df_temp.shape[1] >= 5:
-                            temp_mean = df_temp.iloc[:, 4].mean()
+                # 修复 2：初始化为 NaN 而非 0.0，防止零值破坏马氏距离基线
+                temp_mean = np.nan 
+                
+                temp_idx = (acc_idx - 1) // 6 + 1
+                temp_file = os.path.join(bearing_path, f"temp_{temp_idx:05d}.csv")
+                
+                if temp_file in temp_cache:
+                    temp_mean = temp_cache[temp_file]
+                elif os.path.exists(temp_file):
+                    df_temp = pd.read_csv(temp_file, header=None, on_bad_lines='skip')
+                    if df_temp.shape[1] >= 5:
+                        # 同样强制数值转换
+                        temp_series = pd.to_numeric(df_temp.iloc[:, 4], errors='coerce')
+                        temp_mean = temp_series.mean()
+                        # 仅当温度有效时才存入缓存
+                        if not np.isnan(temp_mean):
                             temp_cache[temp_file] = temp_mean
                 
                 # 合并特征
@@ -402,21 +412,27 @@ def process_dataset(raw_dir: str, output_dir: str, is_train: bool = True):
         # 转换为 DataFrame
         features_df = pd.DataFrame(all_features)
         
-        # 归一化处理 (不归一化标识列)
+        # 修复 4：空级联拦截，防止协方差矩阵和归一化崩溃
+        if features_df.empty:
+            print(f"Skipping {bearing_name}: No valid features extracted.")
+            continue
+            
+        # 修复 2（延续）：对缺失的温度值进行前向填充和后向填充（维持物理状态平稳），而不是用0干扰模型
+        if 'temperature' in features_df.columns:
+            features_df['temperature'] = features_df['temperature'].ffill().bfill()
+            # 如果整个序列全是 NaN（比如温度传感器坏了全没采到），填充该列均值或 0 避免后续报错
+            features_df['temperature'] = features_df['temperature'].fillna(0)
+        
+        # 归一化与健康因子构建
         feat_cols = [c for c in features_df.columns if c not in ['bearing', 'file']]
         
-        # === 修改为基线归一化策略 ===
-        # PDF理论指出：无论训练集还是任意截断的测试集，都应使用其自身的初始平稳期进行基线标准化
-        # 这里默认取前 5% 作为确定无故障的平稳磨合期 (可根据自适应3σ准则后续调优)
         normalizer = BaselineNormalizer(method='z-score', baseline_ratio=0.05)
         features_df = normalizer.fit_transform(features_df, feat_cols)
         
-        # === 新增：构建单调健康因子 (HI) ===
-        # 融合多域信息，无监督构建健康基线并计算马氏距离 (MD)
         hi_constructor = HealthIndicatorConstructor(baseline_ratio=0.05, smooth_method='ewma', ewma_alpha=0.1)
         features_df = hi_constructor.fit_transform(features_df, feat_cols)
                 
-        # 保存结果: 每个 bearing 单独一个 CSV
+        # 保存结果
         prefix_name = 'train' if is_train else 'test'
         output_file = os.path.join(output_dir, f"{bearing_name}_{prefix_name}_features.csv")
         features_df.to_csv(output_file, index=False)
@@ -425,12 +441,10 @@ def process_dataset(raw_dir: str, output_dir: str, is_train: bool = True):
 if __name__ == "__main__":
     import config
     
-    # 既然你现在在 Linux 远程机器上运行，我们需要将路径替换为你挂载的相对/绝对路径
-    # 这里假设你的原始数据在 /root/autodl-tmp 下的某个位置，请你确认下这个路径对不对
-    # 如果不对，你可以在 config.py 里配置，或者直接在这里修改
-    train_dir = "/root/autodl-tmp/PHM 2012/PHM 2012/data/raw/Learning_set" # 请根据实际路径修改
-    test_dir = "/root/autodl-tmp/PHM 2012/PHM 2012/data/raw/Test_set"   # 请根据实际路径修改
-    output_dir = "/root/autodl-tmp/graduation_project_v2/newproduct7/processed_data" # 输出到新项目目录下
+    # 原始数据路径从 config.RAW_DATA_DIR 读取，输出到项目下的 processed_data 目录
+    train_dir = os.path.join(config.RAW_DATA_DIR, "Learning_set")
+    test_dir  = os.path.join(config.RAW_DATA_DIR, "Test_set")
+    output_dir = os.path.join(config.BASE_DIR, "processed_data")
     
     os.makedirs(output_dir, exist_ok=True)
     

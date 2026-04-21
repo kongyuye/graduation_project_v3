@@ -173,7 +173,7 @@ def main():
     criterion_reg = AsymmetricMSELoss(penalty_ratio=5.0)
     
     num_epochs = 150
-    alpha = 0.3  # 分类与回归损失的联合优化权重
+    # alpha 已由模型内置的不确定性动态权重取代，无需手动设置
     
     # === 添加学习率调度器：Warmup (前20%) + 余弦退火 (Cosine Annealing) ===
     warmup_epochs = int(num_epochs * 0.2)
@@ -223,10 +223,14 @@ def main():
             # 前向传播
             preds = model(x, cond)
             
-            # 多任务损失计算
+            # 多任务损失计算 —— 基于不确定性的动态权重 (Kendall et al., 2018)
+            # loss = L_cls * exp(-log_var_cls) + log_var_cls
+            #      + L_reg * exp(-log_var_reg) + log_var_reg
+            # exp(-log_var) 随任务损失自动增大而缩小，log_var 作正则项防止权重坍缩到0
             loss_cls = criterion_cls(preds['class_logits'], y_cls)
             loss_reg = criterion_reg(preds['rul_pred'], y_rul)
-            loss = alpha * loss_cls + (1 - alpha) * loss_reg * 100
+            loss = (loss_cls * torch.exp(-model.log_var_cls) + model.log_var_cls) + \
+                   (loss_reg * torch.exp(-model.log_var_reg) + model.log_var_reg)
             
             # 反向传播与参数更新
             loss.backward()
@@ -257,7 +261,8 @@ def main():
         history_cls_loss.append(avg_cls_loss)
         history_reg_loss.append(avg_reg_loss)
         
-        print(f"==> Epoch {epoch+1} 结束 | LR: {current_lr:.6f} | 平均 Loss: {avg_loss:.4f} (Cls: {avg_cls_loss:.4f}, Reg: {avg_reg_loss:.4f})\n")
+        print(f"==> Epoch {epoch+1} 结束 | LR: {current_lr:.6f} | 平均 Loss: {avg_loss:.4f} (Cls: {avg_cls_loss:.4f}, Reg: {avg_reg_loss:.4f}) | "
+              f"log_var_cls: {model.log_var_cls.item():.4f}, log_var_reg: {model.log_var_reg.item():.4f}\n")
         
     # 3. 固化模型并保存权重 (使用全局配置路径)
     save_path = config.MODEL_WEIGHTS_PATH

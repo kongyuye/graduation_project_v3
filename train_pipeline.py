@@ -72,6 +72,10 @@ class PHM_STGNN_Model(nn.Module):
         self.condition_prompt = ConditionPrompt(cond_dim=cond_dim, d_model=d_model)
         # 阶段四：多任务预测头
         self.mt_head = MultiTaskHead(d_model=d_model, hidden_dim=32, num_classes=num_classes)
+        # 基于不确定性的动态多任务损失权重 (Kendall et al., 2018)
+        # log_var 初始化为 0，对应初始任务权重均等
+        self.log_var_cls = nn.Parameter(torch.zeros(1))
+        self.log_var_reg = nn.Parameter(torch.zeros(1))
 
     def forward(self, x: torch.Tensor, conditions: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
