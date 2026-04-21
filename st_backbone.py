@@ -7,23 +7,24 @@ from torch_geometric.nn import DenseGATConv
 
 # ==========================================
 # 子模块 1: 局部特征提取层 (Temporal 1D-CNN)
+# 把每个节点的时间序列当作独立的信号，在时间轴上进行滑动窗口卷积，从而提取局部的短期时序特征并平滑噪声。
 # ==========================================
+
 class TemporalCNN(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3, dropout: float = 0.0):
         """
         沿着时间轴提取局部平滑特征
         """
         super(TemporalCNN, self).__init__()
-        # 使用 1D 卷积，保持时间步长 T 不变 (padding = kernel_size // 2)
         self.conv1d = nn.Conv1d(
             in_channels=in_channels, 
             out_channels=out_channels, 
             kernel_size=kernel_size, 
             padding=kernel_size // 2
         )
-        # 增加 BatchNorm1d 层以加速收敛并防止过拟合
         self.bn = nn.BatchNorm1d(out_channels)
         self.activation = nn.ReLU()
+        self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -42,6 +43,7 @@ class TemporalCNN(nn.Module):
         x_cnn = self.conv1d(x_cnn)
         x_cnn = self.bn(x_cnn)  # 应用 BatchNorm1d
         x_cnn = self.activation(x_cnn)
+        x_cnn = self.dropout(x_cnn)  # Dropout 正则化
         
         # 4. 恢复为四维张量
         # 获取原始的 B 和 N 维度信息用于重构
@@ -140,20 +142,21 @@ class PositionalEncoding(nn.Module):
 
 
 class GlobalTransformer(nn.Module):
-    def __init__(self, in_features: int, d_model: int = 256, nhead: int = 8, num_layers: int = 3):
+    def __init__(self, in_features: int, d_model: int = 256, nhead: int = 8, num_layers: int = 3, dropout: float = 0.1):
         """
         捕捉长程时序退化演化规律
         """
         super(GlobalTransformer, self).__init__()
         self.d_model = d_model
         
-        # 将展平后的空间特征映射到 Transformer 隐藏维度
         self.input_projection = nn.Linear(in_features, d_model)
         self.pos_encoder = PositionalEncoding(d_model=d_model)
         
-        # Transformer Encoder
+        # Transformer Encoder，显式配置 dropout
         # batch_first=True 表示输入张量的第一个维度是 Batch size
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, batch_first=True, dropout=dropout
+        )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -197,22 +200,24 @@ class SpatioTemporalBackbone(nn.Module):
                  d_gcn: int = 64, 
                  d_model: int = 128, 
                  tf_heads: int = 4, 
-                 tf_layers: int = 2):
+                 tf_layers: int = 2,
+                 dropout: float = 0.1):
         super(SpatioTemporalBackbone, self).__init__()
         
-        # 1. 局部特征提取 (1D-CNN)
-        self.temporal_cnn = TemporalCNN(in_channels=c_in, out_channels=c_cnn)
+        # 1. 局部特征提取 (1D-CNN)，加入 dropout
+        self.temporal_cnn = TemporalCNN(in_channels=c_in, out_channels=c_cnn, dropout=dropout)
         
         # 2. 空间拓扑聚合 (Dense GAT)
         self.spatial_gat = SpatialDenseGAT(in_channels=c_cnn, out_channels=d_gcn, heads=4)
         
-        # 3. 全局时序演化 (Transformer Encoder)
+        # 3. 全局时序演化 (Transformer Encoder)，加入 dropout
         # 展平后的特征维度为 N * d_gcn
         self.global_transformer = GlobalTransformer(
             in_features=num_nodes * d_gcn, 
             d_model=d_model, 
             nhead=tf_heads, 
-            num_layers=tf_layers
+            num_layers=tf_layers,
+            dropout=dropout
         )
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Dict
+import config
 
 class MultiTaskHead(nn.Module):
     """
@@ -13,7 +14,7 @@ class MultiTaskHead(nn.Module):
                  d_model: int = 256, 
                  hidden_dim: int = 128, 
                  num_classes: int = 3, 
-                 dropout_prob: float = 0.3):
+                 dropout_prob: float = config.DROPOUT):
         """
         初始化多任务预测头
         :param d_model: 主干网络输出的特征维度 (例如 256)

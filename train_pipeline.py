@@ -58,24 +58,28 @@ class PHM_STGNN_Model(nn.Module):
     """
     集成前面四个阶段的完整端到端预测模型
     """
-    # 调低默认 d_model=64 以降低参数量
-    def __init__(self, num_nodes=8, c_in=1, d_model=64, cond_dim=2, num_classes=3):
+    def __init__(
+        self,
+        num_nodes  = config.NUM_NODES,
+        c_in       = config.C_IN,
+        d_model    = config.D_MODEL,
+        cond_dim   = config.COND_DIM,
+        num_classes= config.NUM_CLASSES,
+    ):
         super(PHM_STGNN_Model, self).__init__()
         # 阶段二：动态图构建
-        self.graph_constructor = DynamicGraphConstructor(num_nodes=num_nodes, embed_dim=10)
+        self.graph_constructor = DynamicGraphConstructor(num_nodes=num_nodes, embed_dim=config.EMBED_DIM)
         # 阶段三：时空主干 (CNN + GAT + Transformer)
-        # 调低 d_gcn 到 32
         self.st_backbone = SpatioTemporalBackbone(
-            num_nodes=num_nodes, c_in=c_in, c_cnn=32, d_gcn=32, d_model=d_model, tf_heads=4, tf_layers=2
+            num_nodes=num_nodes, c_in=c_in,
+            c_cnn=config.C_CNN, d_gcn=config.D_GCN,
+            d_model=d_model, tf_heads=config.TF_HEADS, tf_layers=config.TF_LAYERS,
+            dropout=config.DROPOUT
         )
         # 提示工程模块
         self.condition_prompt = ConditionPrompt(cond_dim=cond_dim, d_model=d_model)
         # 阶段四：多任务预测头
-        self.mt_head = MultiTaskHead(d_model=d_model, hidden_dim=32, num_classes=num_classes)
-        # 基于不确定性的动态多任务损失权重 (Kendall et al., 2018)
-        # log_var 初始化为 0，对应初始任务权重均等
-        self.log_var_cls = nn.Parameter(torch.zeros(1))
-        self.log_var_reg = nn.Parameter(torch.zeros(1))
+        self.mt_head = MultiTaskHead(d_model=d_model, hidden_dim=config.HIDDEN_DIM, num_classes=num_classes)
 
     def forward(self, x: torch.Tensor, conditions: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -206,8 +210,8 @@ def run_mock_training():
     print(f"训练设备: {device}")
     
     # 实例化模型
-    model = PHM_STGNN_Model(num_nodes=8, c_in=1, d_model=128, cond_dim=2, num_classes=3).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)
+    model = PHM_STGNN_Model().to(device)  # 所有参数均从 config 读取
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
     
     # 初始化 AMP Scaler
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
@@ -236,13 +240,13 @@ def run_mock_training():
     num_epochs = 3
     for epoch in range(num_epochs):
         loss_all, loss_cls, loss_reg = train_one_epoch(
-            model=model, 
-            dataloader=dataloader, 
-            optimizer=optimizer, 
-            scaler=scaler, 
+            model=model,
+            dataloader=dataloader,
+            optimizer=optimizer,
+            scaler=scaler,
             device=device,
-            accumulation_steps=2, # 每2个batch更新一次权重，模拟 Batch=16
-            alpha=0.5
+            accumulation_steps=2,  # 每2个batch更新一次权重，模拟 Batch=16
+            alpha=config.ALPHA
         )
         
         print(f"Epoch {epoch + 1}/{num_epochs} 结束:")
